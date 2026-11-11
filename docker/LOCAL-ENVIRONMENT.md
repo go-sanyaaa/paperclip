@@ -37,6 +37,20 @@ Run `make docker-apply-env` to apply a changed key. No image rebuild is needed.
 This makes the key available in the container environment; propagation into
 isolated Runner environments is a separate concern. Never commit `.env` or keys.
 
+## Outbound MCP/OAuth proxy
+
+The guarded MCP/OAuth HTTP transport reads operator-owned `HTTP_PROXY` and
+`HTTPS_PROXY` (lowercase variants take precedence), with `NO_PROXY` / `no_proxy`
+host, domain-suffix and optional port exclusions. `*` bypasses all proxies.
+HTTP and HTTPS proxies are supported; SOCKS and `ALL_PROXY` are not.
+
+The destination is resolved and checked before opening a proxy tunnel. CONNECT
+uses the approved destination IP, not its hostname; the proxy must permit
+IP-address CONNECT requests. HTTPS retains hostname/SNI certificate validation.
+Proxy authentication is sent only to the proxy. If the proxy fails, the transport
+does not silently fall back to direct egress. The configured proxy is an
+operator-trusted egress boundary and can itself reside on a private network.
+
 ## Data and release safety
 
 The current override uses database `paperclip_release_20261106` and mounts

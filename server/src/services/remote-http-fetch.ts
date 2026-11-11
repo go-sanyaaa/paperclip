@@ -4,6 +4,7 @@ import { connect as netConnect, isIP, type Socket } from "node:net";
 import { Readable } from "node:stream";
 import { connect as tlsConnect, type TLSSocket } from "node:tls";
 import { createBrotliDecompress, createGunzip, createInflate } from "node:zlib";
+import { connectRemoteHttpProxy, remoteHttpProxy } from "./remote-http-proxy.js";
 import { classifyRemoteConnectionError, markRemoteConnectionFailure, recordRemoteConnectionAttempts } from "./remote-connection-failure.js";
 
 import {
@@ -54,6 +55,8 @@ export type GuardedRemoteHttpFetchOptions = RemoteHttpEndpointGuardOptions & {
    * be caught by the peer-address check.
    */
   socketFactory?: RemoteHttpSocketFactory;
+  /** Operator proxy settings; defaults to process.env for production sockets. */
+  proxyEnv?: NodeJS.ProcessEnv;
   connectTimeoutMs?: number;
   /** Deadline for response headers, and idle deadline between body chunks. */
   responseTimeoutMs?: number;
@@ -100,7 +103,7 @@ export async function guardedRemoteHttpFetch(
   const approved = await resolveApprovedRemoteHttpAddresses(endpoint, options, options.error);
   const literalHost = isIP(endpoint.hostname.replace(/^\[|\]$/g, "")) !== 0;
   const platformFetch = options.unpinnedFetch ?? fetch;
-  if (literalHost) {
+  if (literalHost && !remoteHttpProxy(endpoint, options.proxyEnv ?? (options.socketFactory || options.unpinnedFetch ? {} : process.env))) {
     try {
       return await platformFetch(endpoint.toString(), { ...init, redirect: "manual" });
     } catch (error) {
@@ -227,10 +230,16 @@ async function openVerifiedSocket(input: {
   const factory = options.socketFactory
     ?? ((target) => netConnect({ host: target.address, port: target.port }));
 
-  const raw = factory({ address, port, hostname, useTls });
+  const proxy = remoteHttpProxy(new URL(`${useTls ? "https" : "http"}://${isIP(hostname) === 6 ? `[${hostname}]` : hostname}:${port}`),
+    options.proxyEnv ?? (options.socketFactory ? {} : process.env));
+  const raw = proxy
+    ? await connectRemoteHttpProxy({ proxy, address, port, signal, timeoutMs: connectTimeoutMs })
+    : factory({ address, port, hostname, useTls });
 
   try {
-    await once(raw, "connect", { signal, timeoutMs: connectTimeoutMs, what: "connect to" });
+    if (!proxy) {
+      await once(raw, "connect", { signal, timeoutMs: connectTimeoutMs, what: "connect to" });
+    }
   } catch (error) {
     // A connect timeout used to leave the half-open socket behind, because
     // nothing above this point owns it yet.
@@ -244,7 +253,7 @@ async function openVerifiedSocket(input: {
     isAlwaysDeniedLinkLocalIp(peer)
     || (!options.allowPrivateNetwork && isPrivateOrReservedIp(peer))
   );
-  if (!peer || peerDenied || !approvedSet.has(peer)) {
+  if (!proxy && (!peer || peerDenied || !approvedSet.has(peer))) {
     raw.destroy();
     throw options.error(
       "Remote MCP connection resolved to an address that was not approved",
